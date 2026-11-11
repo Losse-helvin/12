@@ -19,6 +19,11 @@ try {
     debug: false
   };
   var CONFIG = Object.assign({}, DEFAULT_CONFIG, window.UBEPRO_CONFIG || {});
+  // Test local uniquement : aucun SMS ni envoi CRM, seul Google Sheets reçoit le formulaire.
+  // Supprimer ce mode après les tests ; le parcours public reste inchangé.
+  var host = window.location.hostname;
+  var localSheetTest = !host || host === 'localhost' || host === '127.0.0.1' ||
+    host === '[::1]' || /\.localhost$|\.local$|\.e2b\.app$/i.test(host);
   var PREF_KEY = 'ubeproCookiePreferencesV1';
   var TRACKING_KEY = 'ubepro_tracking_v1';
   var PAGE_URL_KEY = 'ubepro_tracking_page_url_v1';
@@ -575,7 +580,7 @@ try {
 
   function updateNextButton() {
     if (!next) return;
-    next.disabled = sending || (current === steps.length - 1 && !smsVerified);
+    next.disabled = sending || (!localSheetTest && current === steps.length - 1 && !smsVerified);
     if (sending) next.textContent = 'Envoi…';
     else next.textContent = current === steps.length - 1 ? 'Envoyer ma demande' : 'Suivant';
   }
@@ -643,7 +648,7 @@ try {
     }
     if (key === '7') {
       if (!/^0[67]\d{8}$/.test(currentPhone())) return setStepError('Saisissez un mobile français valide (10 chiffres, 06 ou 07).');
-      if (!smsVerified || verifiedPhone !== currentPhone()) return setStepError('Vérifiez votre numéro par SMS avant de continuer.');
+      if (!localSheetTest && (!smsVerified || verifiedPhone !== currentPhone())) return setStepError('Vérifiez votre numéro par SMS avant de continuer.');
       if (!consentOk()) return setStepError('Veuillez accepter l’utilisation de vos informations avant de valider.');
     }
     return true;
@@ -1100,7 +1105,11 @@ try {
     if (count) count.textContent = 'Demande envoyée';
     if (doneTitle) doneTitle.textContent = 'Merci, votre demande a bien été reçue !';
     if (doneMessage) {
-      if (delivery && (delivery.sheetStatus === 'ok' || delivery.crmStatus !== 'error')) {
+      if (localSheetTest) {
+        doneMessage.textContent = delivery && delivery.sheetStatus === 'ok'
+          ? 'Test local : demande enregistrée dans Google Sheets, sans envoi SMS ni CRM.'
+          : 'Test local terminé.';
+      } else if (delivery && (delivery.sheetStatus === 'ok' || delivery.crmStatus !== 'error')) {
         doneMessage.textContent = 'Vous recevrez prochainement un SMS vous précisant quelle(s) compagnie(s) d’assurances prendront contact avec vous.';
       } else {
         doneMessage.textContent = 'Votre demande a été transmise, mais sa confirmation est en cours de vérification.';
@@ -1154,7 +1163,8 @@ try {
     if (recapField) recapField.value = data.autre_info_fj;
     debugLog('Payload CRM/Sheets préparé.', { formId: formConfig.formId, categorie: data.categorie });
 
-    var crmDelivery = sendCrm(data).then(function (result) {
+    // En mode test local, ne pas contacter le CRM (conserver la logique pour la production).
+    var crmDelivery = localSheetTest ? Promise.resolve({ ok: false, skipped: true }) : sendCrm(data).then(function (result) {
       return { ok: true, result: result };
     }).catch(function (error) {
       return { ok: false, error: error };
@@ -1175,11 +1185,12 @@ try {
         crmError: crm.ok ? null : crm.error,
         sheetError: sheet.ok ? null : sheet.error
       };
-      if (!crm.ok) debugLog('Échec du transport CRM.', crm.error);
+      if (!crm.ok && !crm.skipped) debugLog('Échec du transport CRM.', crm.error);
       if (!sheet.ok) debugLog('Échec du transport Google Sheets.', sheet.error);
 
       if (delivery.confirmed) {
-        pushLeadEvents(data);
+        // Éviter qu'une balise de conversion déclenche un autre envoi pendant le test.
+        if (!localSheetTest) pushLeadEvents(data);
         showDone(delivery);
       } else {
         sending = false;
@@ -1259,7 +1270,7 @@ try {
 
   form.addEventListener('change', syncConditions);
   syncConditions();
-  initSmsVerification();
+  if (!localSheetTest) initSmsVerification();
 
   next.addEventListener('click', function () {
     if (!validateStep()) return;
